@@ -74,7 +74,8 @@ Spectrum-Analyzer-RTDSP/
 │   ├── SAWTOOTH_5_40.jpeg
 │   ├── PULSE_2_10.jpeg
 │   ├── PULSE_2_40.jpeg
-│   └── PULSE_5_10.jpeg
+│   ├── PULSE_5_10.jpeg
+|   └── PULSE_5_40.jpeg
 ```
 
 
