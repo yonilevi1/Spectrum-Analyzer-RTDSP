@@ -1,9 +1,9 @@
-#include <stdbool.h>        // מאפשר שימוש ב-type בוליאני כמו true ו-false
-#include <stdio.h>          // ספרייה סטנדרטית לפונקציות קלט/פלט כמו printf
-#include <math.h>           // ספרייה מתמטית - עבור פעולות כמו sqrt(), sin(), cos()
-#define FFT_SIZE 256        // מגדיר את מספר הדגימות והגודל של ה-FFT
+#include <stdbool.h>        // Enables use of boolean types like true and false
+#include <stdio.h>          // Standard library for I/O functions like printf
+#include <math.h>           // Math library for functions like sqrt(), sin(), cos()
+#define FFT_SIZE 256        // Defines number of samples and FFT size
 
-// חיבורי נתונים ובקרה למסך
+// TFT display data and control pin connections
 char TFT_DataPort at LATE;
 sbit TFT_RST at LATD7_bit;
 sbit TFT_BLED at LATD2_bit;
@@ -20,118 +20,111 @@ sbit TFT_CS_Direction at TRISD10_bit;
 sbit TFT_RD_Direction at TRISD5_bit;
 sbit TFT_WR_Direction at TRISD4_bit;
 
+float realSignal[FFT_SIZE];            // Real part of the signal (FFT input)
+float imagSignal[FFT_SIZE];            // Imaginary part of the signal (usually zero)
+float spectrumMag[FFT_SIZE];           // FFT output - magnitude spectrum
+int spectrumBar[FFT_SIZE];             // Magnitude converted to integer for display
 
-float realSignal[FFT_SIZE];            // החלק הממשי של האות (input ל-FFT)
-float imagSignal[FFT_SIZE];            // החלק המדומה של האות (מתאפס בד"כ בתחילה)
-float spectrumMag[FFT_SIZE];           // התוצאה - גודל ספקטרום האות (משרעת)
-int spectrumBar[FFT_SIZE];             // אותו גודל מומר לערך שלם לצורך ציור על המסך
+volatile float currentSample = 0;      // Last sampled value from ADC
+volatile int currentADC = 0;           // Last sampled value as integer
+volatile bool newSampleFlag = false;   // Indicates if a new sample is available
+volatile int drawCursor = 0;           // Current draw position on screen
+volatile bool graphFinished = false;   // Indicates if drawing is complete (used in main)
+int loopCounter;                       // General loop counter
+volatile float adcBuffer[FFT_SIZE] = {0};  // ADC samples buffer
+volatile int sampleIdx = 0;                 // Next sample write index
+volatile bool isBufferReady = false;       // Indicates if buffer is full
+volatile bool isProcessingDone = false;    // Indicates if FFT processing is complete
 
-volatile float currentSample = 0;      // ערך דגימה אחרון מה-ADC
-volatile int currentADC = 0;           // ערך דגימה אחרון בצורת int
-volatile bool newSampleFlag = false;   // האם התקבלה דגימה חדשה?
-volatile int drawCursor = 0;           // אינדקס לציור על המסך
-volatile bool graphFinished = false;   // האם הציור הסתיים (בשימוש ב-main)
-int loopCounter;                       // משתנה עזר כללי ללולאות
-volatile float adcBuffer[FFT_SIZE] = {0};  // מאגר של דגימות מ-ADC
-volatile int sampleIdx = 0;                 // אינדקס כתיבה לדגימה הבאה
-volatile bool isBufferReady = false;       // האם המאגר מלא?
-volatile bool isProcessingDone = false;    // האם הסתיים העיבוד (FFT)?
-// אתחול הלדים - מגדיר את כל פורט A כיציאה ומאפס אותו
+// Initializes PORTA for LEDs as output and clears it
 void InitLEDs() {
-    AD1PCFG = 0xFFFF;        // מגדיר את כל הפינים כאנלוגיים כבויים (דיגיטליים)
-    JTAGEN_bit = 0;          // מכבה את ממשק ה-JTAG כדי לשחרר את הפינים
-    TRISA = 0x0000;          // מגדיר את כל פורט A כיציאה
-    LATA = 0;                // מאפס את כל הפינים ביציאה
+    AD1PCFG = 0xFFFF;        // Sets all pins to digital (disables analog)
+    JTAGEN_bit = 0;          // Disables JTAG to free pins
+    TRISA = 0x0000;          // Sets PORTA as output
+    LATA = 0;                // Clears all outputs
 }
 
-// אתחול טיימר 1 – משמש ליצירת דגימה קבועה (למשל כל 1ms)
+// Initializes Timer1 to create sampling interrupts at fixed intervals (e.g. 1ms)
 void InitTimer1() {
-    T1CON = 0x8010;          // הפעלת טיימר עם קדם מחלק 1:8
-    T1IP0_bit = 1;           // רמת עדיפות לפסיקה – ביט ראשון
-    T1IP1_bit = 1;           // ביט שני
-    T1IP2_bit = 1;           // ביט שלישי (עדיפות גבוהה)
-    T1IF_bit = 0;            // איפוס דגל הפסיקה
-    T1IE_bit = 1;            // הפעלת פסיקת טיימר 1
-    PR1 = 20000;             // ערך השוואה – קובע את קצב הפסיקה
-    TMR1 = 0;                // איפוס מונה הטיימר
+    T1CON = 0x8010;          // Enables timer with 1:8 prescaler
+    T1IP0_bit = 1;           // Interrupt priority bits
+    T1IP1_bit = 1;
+    T1IP2_bit = 1;           // High priority
+    T1IF_bit = 0;            // Clears interrupt flag
+    T1IE_bit = 1;            // Enables Timer1 interrupt
+    PR1 = 20000;             // Compare value determines interrupt frequency
+    TMR1 = 0;                // Resets timer counter
 }
 
-// אתחול של כניסת ה-ADC
+// Initializes ADC input
 void InitADC() {
-    AD1PCFG = 0xFFFE;        // הפין RB0 נשאר כאנלוגי, כל השאר דיגיטליים
-    JTAGEN_bit = 0;          // מכבה את ה-JTAG
-    TRISB0_bit = 1;          // מגדיר את RB0 כקלט
-    ADC1_Init();             // אתחול רכיב ה-ADC
-    Delay_ms(100);           // המתנה לייצוב
+    AD1PCFG = 0xFFFE;        // RB0 analog input, others digital
+    JTAGEN_bit = 0;          // Disables JTAG
+    TRISB0_bit = 1;          // Sets RB0 as input
+    ADC1_Init();             // Initializes ADC
+    Delay_ms(100);           // Waits for stabilization
 }
 
-// אתחול מסך ה-TFT והצגת כותרת ראשונית
+// Initializes TFT display with initial title
 void InitTFT() {
-    TFT_BLED =1;                       // מדליק את התאורה האחורית
-    TFT_Init_ILI9341_8bit(320, 240);         // אתחול מסך 320x240 בתקשורת 8 ביט
-    TFT_Fill_Screen(CL_Yellow);              // צבע רקע צהוב
-    TFT_Set_Pen(CL_BLACK, 20);               // מגדיר צבע עט לשחור ועובי 20
-    TFT_Set_Font(TFT_defaultFont, CL_BLACK, FO_HORIZONTAL); // מגדיר את הפונט
-    TFT_Write_Text("Yoni and Daniel graph", 100, 100); // כותב טקסט באמצע המסך
+    TFT_BLED = 1;                                // Turns on backlight
+    TFT_Init_ILI9341_8bit(320, 240);             // Initializes 320x240 TFT in 8-bit mode
+    TFT_Fill_Screen(CL_Yellow);                  // Sets background to yellow
+    TFT_Set_Pen(CL_BLACK, 20);                   // Sets pen color black, thickness 20
+    TFT_Set_Font(TFT_defaultFont, CL_BLACK, FO_HORIZONTAL); // Sets font
+    TFT_Write_Text("Yoni and Daniel graph", 100, 100); // Displays initial text
 }
 
+// Draws graph axes and labels
 void DrawGraphAxes() {
-    // רקע כללי
     TFT_Fill_Screen(CL_YELLOW);
 
-    // ציר Y
+    // Y-axis
     TFT_Set_Pen(CL_BLACK, 2);
-    TFT_Line(30, 220, 30, 60);  // קו אנכי (Y)
+    TFT_Line(30, 220, 30, 60);
     TFT_Write_Text("Amp", 5, 40);
 
-    // חץ בקצה העליון של ציר Y
+    // Arrow at top of Y-axis
     TFT_Line(30, 60, 27, 65);
     TFT_Line(30, 60, 33, 65);
 
-    // ציר X
-    TFT_Line(20, 210, 315, 210);  // קו אופקי (X)
+    // X-axis
+    TFT_Line(20, 210, 315, 210);
     TFT_Write_Text("Freq [Hz]", 260, 220);
 
-    // חץ בקצה הימני של ציר X
+    // Arrow at end of X-axis
     TFT_Line(315, 210, 310, 207);
     TFT_Line(315, 210, 310, 213);
-
-
-
 }
 
+// Draws a single bar on the spectrum graph
 void DrawBar(int amplitude, int xCoord) {
     unsigned long yHeight = (unsigned long)amplitude;
 
-    // הגבלת גובה סביר
+    // Limits maximum height, scales small amplitudes
     if (yHeight > 160) yHeight = 160;
     else if (yHeight < 40) yHeight *= 2;
     else if (yHeight < 20) yHeight *= 4;
 
-    if (xCoord < 32 || xCoord > 308) return;  // הגנה על קצה הגרף
+    if (xCoord < 32 || xCoord > 308) return;  // Bounds check
 
-    // צבע הגרף: שחור
     TFT_Set_Pen(CL_BLACK, 2);
-
-    // קו מהבסיס של הגרף (210) כלפי מעלה לפי גובה המשרעת
     TFT_line(xCoord, 210, xCoord, 210 - yHeight);
 }
 
+bool isTemplateDrawn = false;  // Indicates if graph template is drawn
 
-bool isTemplateDrawn = false;  // האם הרקע של הגרף כבר צויר?
-
+// Draws the full spectrum graph
 void DrawSpectrum(int* dataPtr, int dataSize) {
     if (!isTemplateDrawn) {
-        DrawGraphAxes();         // מצייר את הצירים והחצים
+        DrawGraphAxes();
         isTemplateDrawn = true;
     }
 
-    // מחיקת גרף קודם בתוך האזור
+    // Clear previous graph area
     TFT_Set_Pen(CL_YELLOW, 1);
     TFT_Set_Brush(1, CL_YELLOW, 0, LEFT_TO_RIGHT, CL_YELLOW, CL_YELLOW);
     TFT_Rectangle_Round_Edges(33, 25, 308, 208,1);
-
-
 
     for (drawCursor = 1; drawCursor < dataSize && drawCursor < 70; drawCursor++) {
         int x = 32 + drawCursor * 4;
@@ -141,33 +134,32 @@ void DrawSpectrum(int* dataPtr, int dataSize) {
     graphFinished = true;
 }
 
-
-
-
-// מחשב את המשרעת (גודל) של כל תדר ב-FFT
+// Calculates magnitude spectrum from FFT result
 void CalculateSpectrumMagnitude() {
     for (loopCounter = 0; loopCounter < FFT_SIZE; loopCounter++) {
         spectrumMag[loopCounter] = sqrt(realSignal[loopCounter] * realSignal[loopCounter] +
                                         imagSignal[loopCounter] * imagSignal[loopCounter]) / FFT_SIZE;
 
-        spectrumBar[loopCounter] = (int)spectrumMag[loopCounter]; // שמירה כערך שלם לציור
+        spectrumBar[loopCounter] = (int)spectrumMag[loopCounter];
     }
 }
+// Reorders array elements based on bit reversal for FFT preparation
 void BitReversal(float re[], float im[]) {
     unsigned int target = 0, pos, mask;
 
     for (pos = 0; pos < FFT_SIZE; pos++) {
         if (target > pos) {
-            // החלפת מיקום בין האיבר הנוכחי לאיבר המטרה
+            // Swap real parts
             float tempRe = re[target];
-            float tempIm = im[target];
             re[target] = re[pos];
-            im[target] = im[pos];
             re[pos] = tempRe;
+
+            // Swap imaginary parts
+            float tempIm = im[target];
+            im[target] = im[pos];
             im[pos] = tempIm;
         }
 
-        // עדכון אינדקס היעד לפי ביט-רברסל
         mask = FFT_SIZE;
         while (target & (mask >>= 1)) {
             target &= ~mask;
@@ -175,16 +167,17 @@ void BitReversal(float re[], float im[]) {
         target |= mask;
     }
 }
+
+// Executes FFT computation
 void ExecuteFFT(float re[], float im[]) {
-    const float pi = -3.14159265358979323846; // ? שלילי (לפי ההגדרה של FFT)
+    const float pi = -3.14159265358979323846; // Negative per FFT definition
     unsigned int stageSize, groupIdx, pairIdx;
 
     for (stageSize = 1; stageSize < FFT_SIZE; stageSize <<= 1) {
-        unsigned int groupStep = stageSize << 1;     // מרחק בין זוגות
+        unsigned int groupStep = stageSize << 1;
         float baseAngle, twRe, twIm;
 
         for (groupIdx = 0; groupIdx < stageSize; groupIdx++) {
-            // חישוב טוויידל (W) לכל קבוצה
             baseAngle = pi * groupIdx / stageSize;
             twRe = cos(baseAngle);
             twIm = sin(baseAngle);
@@ -195,7 +188,6 @@ void ExecuteFFT(float re[], float im[]) {
                 float tempRe = twRe * re[match] - twIm * im[match];
                 float tempIm = twIm * re[match] + twRe * im[match];
 
-                // חיבור וחיסור מרוכבים לפי FFT
                 re[match] = re[pairIdx] - tempRe;
                 im[match] = im[pairIdx] - tempIm;
 
@@ -205,42 +197,49 @@ void ExecuteFFT(float re[], float im[]) {
         }
     }
 }
+
+// Runs full FFT process including bit reversal
 void RunSpectrumFFT(float re[], float im[]) {
-    BitReversal(re, im);       // סידור ביטים לפי סדר ביט הפוך
-    ExecuteFFT(re, im);        // חישוב ה־FFT בפועל
+    BitReversal(re, im);
+    ExecuteFFT(re, im);
 }
+
+// Applies alternating sign to simulate windowing effect
 void ApplyAlternatingSign() {
     for (loopCounter = 0; loopCounter < FFT_SIZE; loopCounter += 2) {
-        realSignal[loopCounter] = -realSignal[loopCounter]; // הופך סימן לסירוגין
-        imagSignal[loopCounter] = -imagSignal[loopCounter]; // מדמה חלון (window)
+        realSignal[loopCounter] = -realSignal[loopCounter];
+        imagSignal[loopCounter] = -imagSignal[loopCounter];
     }
 }
+
+// Processes incoming signal: copies ADC buffer, runs FFT, calculates magnitude
 void ProcessIncomingSignal() {
-    // העתקת הדגימות מהבאפר אל משתני העבודה
     for (loopCounter = 0; loopCounter < FFT_SIZE; loopCounter++) {
-        realSignal[loopCounter] = adcBuffer[loopCounter]; // רק חלק ממשי
-        imagSignal[loopCounter] = 0;                      // מדומה מאותחל ל-0
+        realSignal[loopCounter] = adcBuffer[loopCounter];
+        imagSignal[loopCounter] = 0;
     }
 
-    ApplyAlternatingSign();             // הכנה (כמו חלון)
-    RunSpectrumFFT(realSignal, imagSignal); // הרצת FFT
-    CalculateSpectrumMagnitude();       // חישוב גודל לכל תדר
-    isProcessingDone = true;            // סימון שסיימנו
+    ApplyAlternatingSign();
+    RunSpectrumFFT(realSignal, imagSignal);
+    CalculateSpectrumMagnitude();
+    isProcessingDone = true;
 }
-// פסיקת טיימר – מתבצעת כל פרק זמן קבוע (לפי PR1) ומבצעת דגימה מה-ADC
+
+// Timer1 interrupt: samples ADC at fixed intervals
 void Timer1Interrupt() iv IVT_TIMER_1 ilevel 7 ics ICS_SRS {
-    T1IF_bit = 0;                         // מאפס את דגל הפסיקה
+    T1IF_bit = 0; // Clears interrupt flag
 
-    if (isBufferReady) return;           // אם הבאפר כבר מלא – לא דוגם
+    if (isBufferReady) return; // If buffer is full, skip sampling
 
-    currentADC = ADC1_Get_Sample(0);     // קורא דגימה מערוץ 0 של ה-ADC
-    currentSample = (float)currentADC;   // ממיר אותה ל-float
-    newSampleFlag = true;                // מסמן שהגיעה דגימה חדשה
+    currentADC = ADC1_Get_Sample(0); // Reads sample from ADC channel 0
+    currentSample = (float)currentADC; // Converts to float
+    newSampleFlag = true; // Sets flag indicating new sample
 }
-bool processLock = false;     // מונע עיבוד כפול
-bool startCycle = false;      // האם נכנסנו למחזור עבודה חדש
 
-// אתחול למצב התחלתי – איפוס המשתנים ומתחילים דגימה מחדש
+bool processLock = false;     // Prevents multiple processing at once
+bool startCycle = false;      // Indicates if acquisition cycle has started
+
+// Starts a new acquisition cycle: resets variables and starts sampling
 void StartNewAcquisitionCycle() {
     processLock = false;
     startCycle = false;
@@ -248,51 +247,53 @@ void StartNewAcquisitionCycle() {
     currentSample = 0;
 
     for (sampleIdx = 0; sampleIdx < FFT_SIZE; sampleIdx++) {
-        adcBuffer[sampleIdx] = 0;        // מאפס את כל הבאפר
+        adcBuffer[sampleIdx] = 0;
     }
 
     sampleIdx = 0;
 
-    LATAbits.LATA1 = 1;  // מדליק לד 1 - דגימה פעילה
-    LATAbits.LATA2 = 0;  // מכבה לד 2 - עדיין לא מעבד
-    EnableInterrupts();  // מאפשר פסיקות
+    LATAbits.LATA1 = 1;  // Turns on LED1 - sampling active
+    LATAbits.LATA2 = 0;  // Turns off LED2 - not processing yet
+    EnableInterrupts();  // Enables interrupts
 }
+
+// Main function
 void main() {
-    InitTFT();       // אתחול מסך
-    InitADC();       // אתחול ממיר ADC
-    InitLEDs();      // הגדרת לדים
-    InitTimer1();    // אתחול טיימר לדגימה
+    InitTFT();       // Initializes TFT display
+    InitADC();       // Initializes ADC
+    InitLEDs();      // Initializes LEDs
+    InitTimer1();    // Initializes Timer1 for sampling
     EnableInterrupts();
 
-    LATAbits.LATA1 = 1; // לד 1 דולק כשמתחילים דגימה
+    LATAbits.LATA1 = 1; // LED1 on at start
 
     while (1) {
         if (currentSample != 0 || startCycle) {
-            startCycle = true;  // נכנסנו למחזור עבודה
+            startCycle = true;
 
             if (newSampleFlag && sampleIdx < FFT_SIZE) {
-                newSampleFlag = false;                      // איפוס דגל דגימה
-                adcBuffer[sampleIdx++] = currentSample;     // שמירה בבאפר
+                newSampleFlag = false;
+                adcBuffer[sampleIdx++] = currentSample;
             }
             else if (!processLock && sampleIdx >= FFT_SIZE) {
-                DisableInterrupts();         // אין יותר דגימות – עוצרים את הפסיקות
+                DisableInterrupts();
                 processLock = true;
 
-                LATAbits.LATA1 = 0;          // לד דגימה נכבה
-                LATAbits.LATA2 = 1;          // לד עיבוד נדלק
-                isBufferReady = true;        // סימון שהבאפר מוכן
+                LATAbits.LATA1 = 0;  // Turns off sampling LED
+                LATAbits.LATA2 = 1;  // Turns on processing LED
+                isBufferReady = true;
 
-                ProcessIncomingSignal();     // עיבוד FFT
+                ProcessIncomingSignal(); // Runs FFT processing
 
                 if (isProcessingDone) {
-                    DrawSpectrum(spectrumBar + FFT_SIZE / 2, FFT_SIZE / 2); // מצייר חצי ספקטרום
+                    DrawSpectrum(spectrumBar + FFT_SIZE / 2, FFT_SIZE / 2); // Draws half-spectrum
                     isProcessingDone = false;
                 }
 
                 if (graphFinished) {
-                    TFT_Write_Text("Yoni and Daniel graph", 100, 10);  // כיתוב על המסך
-                    StartNewAcquisitionCycle(); // מחזור חדש מתחיל
-                    Delay_ms(1000);             // המתנה קלה
+                    TFT_Write_Text("Yoni and Daniel graph", 100, 10);
+                    StartNewAcquisitionCycle(); // Starts new cycle
+                    Delay_ms(1000);
                     graphFinished = false;
                 }
             }
